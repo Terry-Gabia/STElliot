@@ -95,6 +95,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             min-height: 200px;
             overflow-x: auto;
         }
+        .result-colored {
+            background: #0d0d0d;
+            border: 1px solid #222;
+            border-radius: 8px;
+            padding: 20px;
+            font-size: 13px;
+            line-height: 1.6;
+            min-height: 200px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+        }
+        .result-colored .line-buy { color: #51cf66; font-weight: bold; }
+        .result-colored .line-sell { color: #ff6b6b; font-weight: bold; }
+        .result-colored .line-warn { color: #ffd43b; }
+        .result-colored .line-info { color: #00d4ff; }
+        .result-colored .line-header { color: #00d4ff; font-weight: bold; }
+        .result-colored .line-bar { color: #4dabf7; }
         .loading {
             display: none;
             color: #00d4ff;
@@ -140,7 +158,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <button class="preset-btn" onclick="setSymbol('000660')">SK하이닉스</button>
                 <button class="preset-btn" onclick="setSymbol('005380')">현대차</button>
                 <button class="preset-btn" onclick="setSymbol('KOSPI')">코스피</button>
-                <button class="preset-btn" onclick="setSymbol('BINANCE:BTCUSDT')">BTC</button>
+                <button class="preset-btn" onclick="setSymbol('COINBASE:BTCUSD')">BTC</button>
             </div>
         </div>
         <div class="loading" id="loading">분석 중... TradingView 데이터 수집 + 파동 분석 (최대 30초 소요)</div>
@@ -155,6 +173,34 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         Powered by TradingView Data + Elliott Wave Theory
     </div>
     <script>
+        function escapeHtml(text) {
+            return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+        function colorize(text) {
+            return escapeHtml(text).split('\\n').map(line => {
+                if (line.includes('매수 추천') || line.includes('💰'))
+                    return '<span class="line-buy">' + line + '</span>';
+                if (line.includes('★★') && (line.includes('적극') || line.includes('지금')))
+                    return '<span class="line-buy">' + line + '</span>';
+                if (line.includes('★ 지금 매수') || line.includes('★★ 적극'))
+                    return '<span class="line-buy">' + line + '</span>';
+                if (line.includes('1차 매수') || line.includes('2차 매수') || line.includes('3차 매수'))
+                    return '<span class="line-buy">' + line + '</span>';
+                if (line.includes('손절'))
+                    return '<span class="line-sell">' + line + '</span>';
+                if (line.includes('⚠️') || line.includes('비추천'))
+                    return '<span class="line-warn">' + line + '</span>';
+                if (line.includes('━') || line.includes('═'))
+                    return '<span class="line-header">' + line + '</span>';
+                if (line.includes('종합 판단') || line.includes('가격 레벨') || line.includes('📊') || line.includes('💰'))
+                    return '<span class="line-info">' + line + '</span>';
+                if (line.includes('█'))
+                    return '<span class="line-bar">' + line + '</span>';
+                if (line.includes('◀◀◀'))
+                    return '<span class="line-buy">' + line + '</span>';
+                return line;
+            }).join('\\n');
+        }
         function setSymbol(sym) {
             document.getElementById('symbol').value = sym;
         }
@@ -183,9 +229,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const data = await resp.json();
 
                 if (data.error) {
+                    result.className = 'result';
                     result.textContent = '오류: ' + data.error;
                 } else {
-                    result.textContent = data.result;
+                    result.className = 'result-colored';
+                    result.innerHTML = colorize(data.result);
                 }
                 result.style.display = 'block';
             } catch (e) {

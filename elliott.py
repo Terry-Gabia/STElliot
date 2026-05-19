@@ -399,6 +399,8 @@ def analyze(symbol_input, timeframe='60', n_bars=500):
         print(f'  → 매수 비추천')
     elif 'b_high' in abc:
         c_ratio_pct = abc['c_ratio'] * 100
+        b_high = abc['b_high']
+
         if c_ratio_pct < 30:
             print(f'  📉 C파 초기 (C/A={c_ratio_pct:.0f}%) — 추가 하락 예상')
             print(f'  → 매수 대기')
@@ -417,6 +419,97 @@ def analyze(symbol_input, timeframe='60', n_bars=500):
         else:
             print(f'  ⚠️  C파 과확장 (C/A={c_ratio_pct:.0f}%) — 과매도')
             print(f'  → 바닥잡기 위험, 확인 후 매수')
+
+        # ─── 매수 추천 가격 ───
+        print(f'\n{"━"*65}')
+        print(f'  💰 매수 추천 가격')
+        print(f'{"━"*65}')
+
+        t_0618 = b_high - a_drop * 0.618
+        t_0786 = b_high - a_drop * 0.786
+        t_1 = b_high - a_drop
+        t_1272 = b_high - a_drop * 1.272
+
+        # 전체 피보나치 레벨
+        f_382 = recent_high - full_range * 0.382
+        f_500 = recent_high - full_range * 0.500
+        f_618 = recent_high - full_range * 0.618
+
+        if c_ratio_pct < 55:
+            # C파 초~중반: 아직 멀어서 C=0.618A ~ C=A 구간 추천
+            entry1 = t_0618
+            entry2 = t_1
+            entry3 = t_1272
+            print(f'\n  현재가 {current:,.0f}에서 아직 하락 여지 있음')
+            print(f'  ┌───────────────────────────────────────────┐')
+            print(f'  │  1차 매수  {entry1:>12,.0f}  (C=0.618A)     │')
+            print(f'  │  2차 매수  {entry2:>12,.0f}  (C=A, 핵심)    │')
+            print(f'  │  3차 매수  {entry3:>12,.0f}  (C=1.272A)     │')
+            print(f'  │  손절      {b_high - a_drop * 1.618:>12,.0f}  (C=1.618A 이탈) │')
+            print(f'  └───────────────────────────────────────────┘')
+            print(f'  비중: 1차 30% / 2차 50% / 3차 20%')
+        elif 55 <= c_ratio_pct < 90:
+            # C파 중후반: 0.618A 근처 또는 이미 이탈
+            if current <= t_0618 * 1.01:
+                print(f'\n  C=0.618A({t_0618:,.0f}) 도달 — 1차 매수 구간!')
+                print(f'  ┌───────────────────────────────────────────┐')
+                print(f'  │  ★ 지금 매수  {current:>10,.0f}  (1차 30%)   │')
+                print(f'  │  2차 매수  {t_1:>12,.0f}  (C=A)          │')
+                print(f'  │  3차 매수  {t_1272:>12,.0f}  (C=1.272A)     │')
+                print(f'  │  손절      {b_high - a_drop * 1.618:>12,.0f}  (C=1.618A 이탈) │')
+                print(f'  └───────────────────────────────────────────┘')
+            else:
+                print(f'\n  C=A({t_1:,.0f}) 타겟으로 진행 중')
+                print(f'  ┌───────────────────────────────────────────┐')
+                print(f'  │  1차 매수  {t_1:>12,.0f}  (C=A, 핵심)    │')
+                print(f'  │  2차 매수  {t_1272:>12,.0f}  (C=1.272A)     │')
+                print(f'  │  손절      {b_high - a_drop * 1.618:>12,.0f}  (C=1.618A 이탈) │')
+                print(f'  └───────────────────────────────────────────┘')
+            print(f'  비중: 1차 30% / 2차 50% / 3차 20%')
+        elif 90 <= c_ratio_pct <= 115:
+            print(f'\n  C≈A 도달 — 적극 매수 구간!')
+            print(f'  ┌───────────────────────────────────────────┐')
+            print(f'  │  ★★ 적극 매수  {current:>10,.0f}  (50~70%)  │')
+            print(f'  │  추가 매수  {t_1272:>12,.0f}  (C=1.272A)     │')
+            print(f'  │  손절      {b_high - a_drop * 1.618:>12,.0f}  (C=1.618A 이탈) │')
+            print(f'  └───────────────────────────────────────────┘')
+        else:
+            print(f'\n  과매도 구간 — 반등 확인 후 매수')
+            print(f'  ┌───────────────────────────────────────────┐')
+            print(f'  │  반등 확인 후  {current:>10,.0f}  부근 매수  │')
+            print(f'  │  전체 61.8%  {f_618:>12,.0f}  지지 확인    │')
+            print(f'  │  손절        {recent_high - full_range * 0.786:>12,.0f}  (78.6% 이탈)  │')
+            print(f'  └───────────────────────────────────────────┘')
+
+        # ─── 시각화: 가격 레벨 맵 ───
+        print(f'\n{"━"*65}')
+        print(f'  📊 가격 레벨 맵')
+        print(f'{"━"*65}')
+
+        levels = []
+        levels.append(('5파 고점', recent_high))
+        if 'b_high' in abc:
+            levels.append(('B파 고점', abc['b_high']))
+        levels.append(('현재가 ★', current))
+        if 'a_low' in abc:
+            levels.append(('A파 저점', abc['a_low']))
+        levels.append(('C=0.618A', t_0618))
+        levels.append(('C=A(1:1)', t_1))
+        levels.append(('C=1.272A', t_1272))
+
+        # 정렬 (고→저)
+        levels.sort(key=lambda x: x[1], reverse=True)
+        max_price = levels[0][1]
+        min_price = levels[-1][1]
+        price_range = max_price - min_price if max_price != min_price else 1
+
+        for label, price in levels:
+            bar_len = int((price - min_price) / price_range * 40)
+            bar = '█' * bar_len
+            is_current = '★' in label
+            marker = ' ◀◀◀' if is_current else ''
+            print(f'  {label:12s} {price:>12,.0f} |{bar}{marker}')
+
     else:
         print(f'  📉 {phase}')
 
