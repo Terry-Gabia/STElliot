@@ -13,111 +13,109 @@ from websocket import create_connection
 
 
 def generate_session():
-    """TradingView 세션 ID 생성"""
     chars = string.ascii_lowercase
     return "qs_" + "".join(random.choice(chars) for _ in range(12))
 
 
 def generate_chart_session():
-    """TradingView 차트 세션 ID 생성"""
     chars = string.ascii_lowercase
     return "cs_" + "".join(random.choice(chars) for _ in range(12))
 
 
 def prepend_header(msg):
-    """메시지에 헤더 추가"""
     return "~m~" + str(len(msg)) + "~m~" + msg
 
 
 def construct_message(func, params):
-    """TradingView 프로토콜 메시지 생성"""
     return json.dumps({"m": func, "p": params}, separators=(",", ":"))
 
 
 def create_message(func, params):
-    """전송용 메시지 생성"""
     return prepend_header(construct_message(func, params))
 
 
 def send_message(ws, func, params):
-    """웹소켓으로 메시지 전송"""
     ws.send(create_message(func, params))
 
 
-def fetch_tv_data(symbol="KRX:000660", interval="60", n_bars=500):
+def fetch_tv_data(symbol="KRX:000660", interval="60", n_bars=500, timeout=15):
     """
     TradingView에서 OHLCV 데이터 가져오기
 
     Args:
         symbol: TradingView 심볼
-            한국: KRX:005930 (삼성전자), KRX:000660 (SK하이닉스), KRX:KOSPI (코스피)
-            미국: NASDAQ:AAPL, NASDAQ:NVDA, NYSE:TSLA
-            암호화폐: BINANCE:BTCUSDT, BINANCE:ETHUSDT
-        interval: 봉 간격
-            '1', '5', '15', '60' (분), '240' (4시간), 'D' (일봉), 'W' (주봉)
-        n_bars: 가져올 봉 수 (최대 5000)
-
-    Returns:
-        pandas DataFrame (datetime index, open, high, low, close, volume)
+        interval: 봉 간격 ('1','5','15','60','240','D','W')
+        n_bars: 가져올 봉 수
+        timeout: 웹소켓 타임아웃 (초)
     """
 
-    ws = create_connection(
-        "wss://data.tradingview.com/socket.io/websocket",
-        headers={"Origin": "https://data.tradingview.com"},
-        timeout=30
-    )
+    try:
+        ws = create_connection(
+            "wss://data.tradingview.com/socket.io/websocket",
+            headers={"Origin": "https://data.tradingview.com"},
+            timeout=timeout
+        )
+    except Exception as e:
+        print(f"웹소켓 연결 실패: {e}")
+        return None
 
     session = generate_session()
     chart_session = generate_chart_session()
 
-    # 초기 메시지 수신
-    ws.recv()
+    try:
+        ws.recv()
 
-    # 세션 설정
-    send_message(ws, "set_auth_token", ["unauthorized_user_token"])
-    send_message(ws, "chart_create_session", [chart_session, ""])
-    send_message(ws, "quote_create_session", [session])
-    send_message(ws, "quote_set_fields", [session,
-        "ch", "chp", "current_session", "description", "local_description",
-        "language", "exchange", "fractional", "is_tradable", "lp", "lp_time",
-        "minmov", "minmove2", "original_name", "pricescale", "pro_name",
-        "short_name", "type", "update_mode", "volume", "currency_code",
-        "logoid", "provider_id"
-    ])
-    send_message(ws, "quote_add_symbols", [session, symbol])
-    send_message(ws, "quote_fast_symbols", [session, symbol])
+        send_message(ws, "set_auth_token", ["unauthorized_user_token"])
+        send_message(ws, "chart_create_session", [chart_session, ""])
+        send_message(ws, "quote_create_session", [session])
+        send_message(ws, "quote_set_fields", [session,
+            "ch", "chp", "current_session", "description", "local_description",
+            "language", "exchange", "fractional", "is_tradable", "lp", "lp_time",
+            "minmov", "minmove2", "original_name", "pricescale", "pro_name",
+            "short_name", "type", "update_mode", "volume", "currency_code",
+            "logoid", "provider_id"
+        ])
+        send_message(ws, "quote_add_symbols", [session, symbol])
+        send_message(ws, "quote_fast_symbols", [session, symbol])
 
-    # 차트 데이터 요청
-    send_message(ws, "resolve_symbol", [
-        chart_session, "sds_sym_1",
-        '={"symbol":"' + symbol + '","adjustment":"splits","session":"extended"}'
-    ])
-    send_message(ws, "create_series", [
-        chart_session, "sds_1", "s1", "sds_sym_1", interval, n_bars, ""
-    ])
+        send_message(ws, "resolve_symbol", [
+            chart_session, "sds_sym_1",
+            '={"symbol":"' + symbol + '","adjustment":"splits","session":"extended"}'
+        ])
+        send_message(ws, "create_series", [
+            chart_session, "sds_1", "s1", "sds_sym_1", interval, n_bars, ""
+        ])
 
-    # 데이터 수신
-    raw_data = ""
-    for _ in range(100):
-        try:
-            result = ws.recv()
-            raw_data += result + "\n"
+        raw_data = ""
+        for _ in range(100):
+            try:
+                result = ws.recv()
+                raw_data += result + "\n"
 
-            if "~h~" in result:
-                ws.send(result)
+                if "~h~" in result:
+                    ws.send(result)
 
-            if "series_completed" in result:
+                if "series_completed" in result:
+                    break
+
+                if "symbol_error" in result or "critical_error" in result:
+                    break
+            except Exception:
                 break
-        except Exception:
-            break
 
-    ws.close()
+    except Exception as e:
+        print(f"데이터 수신 오류: {e}")
+        return None
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
     return parse_raw_data(raw_data)
 
 
 def parse_raw_data(raw_data):
-    """수신된 원시 데이터에서 OHLCV 추출"""
-
     candles = []
 
     for line in raw_data.split("\n"):
