@@ -49,15 +49,72 @@ def detect_gap_spike(df, recent_high, recent_high_date):
     rise_pct = (recent_high - avg_before) / avg_before * 100
 
     # 갭 체크: 하루 사이에 5% 이상 갭업이 있었는지
-    has_gap = False
+    max_gap = 0
+    max_gap_rise = 0
     for i in range(max(1, len(before)-10), len(before)):
         gap = (before['open'].iloc[i] - before['close'].iloc[i-1]) / before['close'].iloc[i-1] * 100
-        if gap > 3:
-            has_gap = True
-            break
+        if gap > max_gap:
+            max_gap = gap
+            # 갭 당일 상승폭
+            max_gap_rise = (before['close'].iloc[i] - before['close'].iloc[i-1]) / before['close'].iloc[i-1] * 100
 
-    is_spike = rise_pct > 25 and has_gap
+    # 스파이크 판정: 최대 갭이 전체 상승의 40% 이상을 차지해야 진짜 이벤트 스파이크
+    # (정상적 다봉 상승에서 갭이 있어도 비중이 작으면 스파이크 아님)
+    gap_contribution = max_gap_rise / rise_pct * 100 if rise_pct > 0 else 0
+    is_spike = rise_pct > 35 and max_gap > 5 and gap_contribution > 50
     return is_spike, rise_pct, avg_before
+
+
+# ─── 갭 분석 ───
+
+def find_unfilled_gaps(df, current_price, range_pct=30):
+    """미충전 갭업 탐지 (현재가 ±range_pct% 범위)"""
+    gaps = []
+    for i in range(1, len(df)):
+        prev_high = df.iloc[i-1]['high']
+        curr_low = df.iloc[i]['low']
+
+        if prev_high < curr_low:
+            gap_bottom = prev_high
+            gap_top = curr_low
+            gap_size = gap_top - gap_bottom
+
+            # 이후 채워졌는지 확인
+            filled = False
+            fill_price = gap_top
+            for j in range(i+1, len(df)):
+                if df.iloc[j]['low'] <= gap_bottom:
+                    filled = True
+                    break
+                if df.iloc[j]['low'] < fill_price:
+                    fill_price = df.iloc[j]['low']
+
+            if not filled and gap_bottom > current_price * (1 - range_pct/100) and gap_bottom < current_price * (1 + range_pct/100):
+                pct = (gap_bottom - current_price) / current_price * 100
+                gaps.append({
+                    'date_from': df.index[i-1],
+                    'date_to': df.index[i],
+                    'bottom': gap_bottom,
+                    'top': gap_top,
+                    'size': gap_size,
+                    'fill_price': fill_price,
+                    'pct': pct,
+                })
+    return gaps
+
+
+def find_gap_fib_clusters(gaps, fib_levels):
+    """갭과 피보나치 레벨이 겹치는 클러스터 탐지"""
+    clusters = []
+    for g in gaps:
+        for label, price in fib_levels:
+            if g['bottom'] <= price <= g['top']:
+                clusters.append({
+                    'gap': g,
+                    'fib_label': label,
+                    'fib_price': price,
+                })
+    return clusters
 
 
 # ─── ABC 구조 탐지 ───
@@ -65,7 +122,7 @@ def detect_gap_spike(df, recent_high, recent_high_date):
 def find_abc_structure(df, recent_high, recent_high_date):
     """고점 이후 ABC 조정 구조 자동 탐지"""
     after_high = df.loc[df.index > recent_high_date]
-    if len(after_high) < 5:
+    if len(after_high) < 2:
         return None
 
     # A파 저점: 고점 이후 첫 번째 주요 저점
@@ -150,16 +207,31 @@ def find_abc_structure(df, recent_high, recent_high_date):
 
 # ─── 상승 시작점 찾기 ───
 
-def find_uptrend_start(df, high_date):
-    """상승 시작점 (고점 이전 주요 저점)"""
+def find_uptrend_start(df, high_date, high_price):
+    """상승 시작점 (고점 이전 가장 가까운 주요 저점)"""
     before = df.loc[df.index < high_date]
     if len(before) < 10:
         return before['low'].min(), before['low'].idxmin()
 
-    # 고점 대비 가장 큰 상승을 만든 저점
-    low_val = before['low'].min()
-    low_date = before['low'].idxmin()
-    return low_val, low_date
+    # 전략: 고점에서 뒤로 가면서, 20% 이상 하락한 저점 찾기
+    # 그게 최근 상승의 시작점
+    best_low = before['low'].min()
+    best_date = before['low'].idxmin()
+
+    # 고점 뒤에서부터 역순으로, 직전 주요 저점(고점 대비 15%+ 하락) 찾기
+    for lookback in [60, 90, 120, 200, len(before)]:
+        window = before.tail(lookback)
+        low_val = window['low'].min()
+        low_date = window['low'].idxmin()
+        drop_pct = (high_price - low_val) / high_price * 100
+
+        # 고점 대비 15~70% 하락한 저점이 있으면 사용
+        if 15 <= drop_pct <= 70:
+            best_low = low_val
+            best_date = low_date
+            break
+
+    return best_low, best_date
 
 
 # ─── 더블바텀 감지 ───
@@ -257,18 +329,27 @@ def analyze(symbol_input, timeframe='60', n_bars=500):
         print('  ❌ 스윙 포인트를 찾을 수 없습니다.')
         return None
 
-    # 최근 주요 고점 (현재가보다 높은 것 중 가장 최근)
+    # 최근 주요 고점 (현재가보다 높은 것 중 가장 높은 것)
     recent_highs = [(d, p) for d, p in highs if p > current]
     if recent_highs:
         recent_high_date, recent_high = max(recent_highs, key=lambda x: x[1])
     else:
         recent_high_date, recent_high = max(highs, key=lambda x: x[1])
 
+    # 최근 봉에서 스윙 윈도우 때문에 누락된 고점 보정
+    # (마지막 window개 봉은 스윙 탐지 불가 → 직접 체크)
+    tail_df = df.tail(15)
+    tail_max = tail_df['high'].max()
+    tail_max_date = tail_df['high'].idxmax()
+    if tail_max > recent_high and tail_max > current:
+        recent_high = tail_max
+        recent_high_date = tail_max_date
+
     # ─── 갭 급등 감지 ───
     is_spike, spike_pct, pre_spike_avg = detect_gap_spike(df, recent_high, recent_high_date)
 
     # ─── 상승 시작점 ───
-    uptrend_start, uptrend_start_date = find_uptrend_start(df, recent_high_date)
+    uptrend_start, uptrend_start_date = find_uptrend_start(df, recent_high_date, recent_high)
 
     # ─── ABC 구조 분석 ───
     abc = find_abc_structure(df, recent_high, recent_high_date)
@@ -368,6 +449,41 @@ def analyze(symbol_input, timeframe='60', n_bars=500):
             status = f'▼{dist:,.0f} ({dist/current*100:.1f}%)'
         near = ' ◀ 현재 근접' if abs(current - level) / current * 100 < 1.5 else ''
         print(f'  {label:6s}: {level:>12,.0f}  {status}{near}')
+
+    # ─── 갭 분석 ───
+    gaps = find_unfilled_gaps(df, current)
+    if gaps:
+        # 현재가 아래의 갭만 (하락 시 채울 갭)
+        gaps_below = [g for g in gaps if g['bottom'] < current]
+        if gaps_below:
+            print(f'\n{"━"*65}')
+            print(f'  미충전 갭 (하방)')
+            print(f'{"━"*65}')
+            for g in sorted(gaps_below, key=lambda x: x['bottom'], reverse=True)[:5]:
+                d_from = g['date_from']
+                d_to = g['date_to']
+                fmt_from = d_from.strftime('%m/%d') if hasattr(d_from, 'strftime') else str(d_from)[:5]
+                fmt_to = d_to.strftime('%m/%d') if hasattr(d_to, 'strftime') else str(d_to)[:5]
+                remaining_top = min(g['fill_price'], g['top'])
+                print(f'  {fmt_from}→{fmt_to} | {g["bottom"]:>12,.0f} ~ {g["top"]:>12,.0f} (크기:{g["size"]:>10,.0f}) | {g["pct"]:+.1f}%')
+
+            # 피보나치 레벨 수집 (갭 클러스터 탐지용)
+            fib_levels = []
+            for label, ratio in [('23.6%', 0.236), ('38.2%', 0.382), ('50.0%', 0.5), ('61.8%', 0.618)]:
+                fib_levels.append((f'전체{label}', recent_high - full_range * ratio))
+            if 'b_high' in abc:
+                b_high_val = abc['b_high']
+                for label, ratio in [('C=0.618A', 0.618), ('C=A', 1.0), ('C=1.272A', 1.272)]:
+                    fib_levels.append((label, b_high_val - a_drop * ratio))
+
+            clusters = find_gap_fib_clusters(gaps_below, fib_levels)
+            if clusters:
+                print(f'\n  ★ 갭 + 피보나치 클러스터 발견!')
+                for c in clusters:
+                    g = c['gap']
+                    fmt_from = g['date_from'].strftime('%m/%d') if hasattr(g['date_from'], 'strftime') else str(g['date_from'])[:5]
+                    fmt_to = g['date_to'].strftime('%m/%d') if hasattr(g['date_to'], 'strftime') else str(g['date_to'])[:5]
+                    print(f'  → {fmt_from}→{fmt_to} 갭({g["bottom"]:,.0f}~{g["top"]:,.0f}) 안에 {c["fib_label"]}({c["fib_price"]:,.0f})')
 
     # 더블바텀 감지
     if 'a_low' in abc:
