@@ -38,17 +38,44 @@ def send_message(ws, func, params):
     ws.send(create_message(func, params))
 
 
-def fetch_tv_data(symbol="KRX:000660", interval="60", n_bars=500, timeout=15):
+import time as _time
+
+# 메모리 캐시: {(symbol, interval): (timestamp, dataframe)}
+_cache = {}
+_CACHE_TTL = 120  # 2분 캐시
+
+
+def fetch_tv_data(symbol="KRX:000660", interval="60", n_bars=500, timeout=15, retries=3):
     """
-    TradingView에서 OHLCV 데이터 가져오기
+    TradingView에서 OHLCV 데이터 가져오기 (재시도 + 캐싱)
 
     Args:
         symbol: TradingView 심볼
         interval: 봉 간격 ('1','5','15','60','240','D','W')
         n_bars: 가져올 봉 수
         timeout: 웹소켓 타임아웃 (초)
+        retries: 실패 시 재시도 횟수
     """
+    # 캐시 확인
+    cache_key = (symbol, interval, n_bars)
+    if cache_key in _cache:
+        cached_time, cached_df = _cache[cache_key]
+        if _time.time() - cached_time < _CACHE_TTL:
+            return cached_df
 
+    for attempt in range(1, retries + 1):
+        df = _fetch_tv_data_once(symbol, interval, n_bars, timeout)
+        if df is not None and not df.empty:
+            _cache[cache_key] = (_time.time(), df)
+            return df
+        if attempt < retries:
+            _time.sleep(2)
+
+    return None
+
+
+def _fetch_tv_data_once(symbol, interval, n_bars, timeout):
+    """단일 시도 데이터 수집"""
     try:
         ws = create_connection(
             "wss://data.tradingview.com/socket.io/websocket",
@@ -56,7 +83,6 @@ def fetch_tv_data(symbol="KRX:000660", interval="60", n_bars=500, timeout=15):
             timeout=timeout
         )
     except Exception as e:
-        print(f"웹소켓 연결 실패: {e}")
         return None
 
     session = generate_session()
@@ -103,8 +129,7 @@ def fetch_tv_data(symbol="KRX:000660", interval="60", n_bars=500, timeout=15):
             except Exception:
                 break
 
-    except Exception as e:
-        print(f"데이터 수신 오류: {e}")
+    except Exception:
         return None
     finally:
         try:
