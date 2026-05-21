@@ -408,6 +408,8 @@ MAIN_TEMPLATE = """<!DOCTYPE html>
 @app.get("/auth/google/login")
 async def google_login(request: Request):
     redirect_uri = request.url_for("google_callback")
+    # 리버스 프록시 뒤에서 http → https 강제 변환
+    redirect_uri = str(redirect_uri).replace("http://", "https://")
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
