@@ -1,9 +1,14 @@
 """
-STElliot Web — 엘리어트 파동 자동 분석기 웹 UI
+STElliot Web — 엘리어트 파동 자동 분석기 웹 UI (Google SSO)
 """
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+import os
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.middleware.sessions import SessionMiddleware
+from authlib.integrations.starlette_client import OAuth
+from jose import jwt
+from datetime import datetime, timedelta, timezone
 import asyncio
 import io
 import sys
@@ -11,9 +16,118 @@ import traceback
 
 from elliott import analyze
 
-app = FastAPI(title="STElliot", description="엘리어트 파동 자동 분석기")
+# ── Config ──────────────────────────────────────────────
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+SECRET_KEY = os.environ.get("SECRET_KEY", "stelliot-change-this-secret")
+ALLOWED_EMAILS = [
+    e.strip() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()
+]
 
-HTML_TEMPLATE = """<!DOCTYPE html>
+# ── App ─────────────────────────────────────────────────
+app = FastAPI(title="STElliot", description="엘리어트 파동 자동 분석기")
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+
+# ── OAuth ───────────────────────────────────────────────
+oauth = OAuth()
+oauth.register(
+    name="google",
+    client_id=GOOGLE_CLIENT_ID,
+    client_secret=GOOGLE_CLIENT_SECRET,
+    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+    client_kwargs={"scope": "openid email profile"},
+)
+
+
+# ── JWT helpers ─────────────────────────────────────────
+def _create_token(email: str, name: str, picture: str) -> str:
+    return jwt.encode(
+        {
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "exp": datetime.now(timezone.utc) + timedelta(days=7),
+        },
+        SECRET_KEY,
+        algorithm="HS256",
+    )
+
+
+def _get_user(request: Request) -> dict | None:
+    token = request.cookies.get("stelliot_token")
+    if not token:
+        return None
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+    except Exception:
+        return None
+
+
+# ── Login Page ──────────────────────────────────────────
+LOGIN_TEMPLATE = """<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STElliot — 로그인</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        .login-box {
+            text-align: center;
+            background: #111;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 48px;
+        }
+        h1 { font-size: 42px; color: #00d4ff; letter-spacing: 3px; margin-bottom: 8px; }
+        .subtitle { color: #888; font-size: 14px; margin-bottom: 36px; }
+        .google-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            background: #fff;
+            color: #333;
+            border: none;
+            padding: 12px 32px;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+            text-decoration: none;
+            transition: box-shadow 0.2s;
+        }
+        .google-btn:hover { box-shadow: 0 2px 12px rgba(0,212,255,0.3); }
+        .google-btn svg { width: 20px; height: 20px; }
+        .error { color: #ff6b6b; margin-top: 16px; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h1>STElliot</h1>
+        <p class="subtitle">엘리어트 파동 자동 분석기</p>
+        <a href="/auth/google/login" class="google-btn">
+            <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+            Google 계정으로 로그인
+        </a>
+        <!--ERRMSG-->
+    </div>
+</body>
+</html>"""
+
+
+# ── Main Page ───────────────────────────────────────────
+MAIN_TEMPLATE = """<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
@@ -31,9 +145,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             background: linear-gradient(135deg, #1a1a2e, #16213e);
             padding: 24px 32px;
             border-bottom: 1px solid #333;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
-        .header h1 { font-size: 28px; color: #00d4ff; letter-spacing: 2px; }
-        .header p { color: #888; margin-top: 4px; font-size: 14px; }
+        .header-left h1 { font-size: 28px; color: #00d4ff; letter-spacing: 2px; }
+        .header-left p { color: #888; margin-top: 4px; font-size: 14px; }
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .user-info img {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 1px solid #444;
+        }
+        .user-info .name { color: #aaa; font-size: 13px; }
+        .logout-btn {
+            background: none;
+            border: 1px solid #444;
+            color: #888;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .logout-btn:hover { border-color: #ff6b6b; color: #ff6b6b; }
         .container { max-width: 900px; margin: 0 auto; padding: 24px; }
         .input-section {
             background: #111;
@@ -132,8 +273,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
     <div class="header">
-        <h1>STElliot</h1>
-        <p>TradingView 실시간 데이터 기반 엘리어트 파동 자동 분석기</p>
+        <div class="header-left">
+            <h1>STElliot</h1>
+            <p>TradingView 실시간 데이터 기반 엘리어트 파동 자동 분석기</p>
+        </div>
+        <div class="user-info">
+            <!--USER_AVATAR-->
+            <span class="name"><!--USER_NAME--></span>
+            <a href="/auth/logout" class="logout-btn">logout</a>
+        </div>
     </div>
     <div class="container">
         <div class="input-section">
@@ -256,11 +404,73 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
+# ── Auth Routes ─────────────────────────────────────────
+@app.get("/auth/google/login")
+async def google_login(request: Request):
+    redirect_uri = request.url_for("google_callback")
+    return await oauth.google.authorize_redirect(request, redirect_uri)
+
+
+@app.get("/auth/google/callback")
+async def google_callback(request: Request):
+    try:
+        token = await oauth.google.authorize_access_token(request)
+    except Exception:
+        html = LOGIN_TEMPLATE.replace(
+            "<!--ERRMSG-->",
+            '<p class="error">인증 실패. 다시 시도해주세요.</p>',
+        )
+        return HTMLResponse(html)
+
+    userinfo = token.get("userinfo", {})
+    email = userinfo.get("email", "")
+    name = userinfo.get("name", "")
+    picture = userinfo.get("picture", "")
+
+    if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:
+        html = LOGIN_TEMPLATE.replace(
+            "<!--ERRMSG-->",
+            f'<p class="error">접근 권한이 없습니다: {email}</p>',
+        )
+        return HTMLResponse(html)
+
+    jwt_token = _create_token(email, name, picture)
+    response = RedirectResponse(url="/", status_code=302)
+    response.set_cookie(
+        "stelliot_token",
+        jwt_token,
+        max_age=7 * 24 * 3600,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/auth/logout")
+async def logout():
+    response = RedirectResponse(url="/", status_code=302)
+    response.delete_cookie("stelliot_token")
+    return response
+
+
+# ── Pages ───────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
-async def index():
-    return HTML_TEMPLATE
+async def index(request: Request):
+    user = _get_user(request)
+    if not user:
+        html = LOGIN_TEMPLATE.replace("<!--ERRMSG-->", "")
+        return HTMLResponse(html)
+
+    name = user.get("name", "")
+    picture = user.get("picture", "")
+    avatar_tag = f'<img src="{picture}" alt="">' if picture else ""
+
+    html = MAIN_TEMPLATE.replace("<!--USER_AVATAR-->", avatar_tag)
+    html = html.replace("<!--USER_NAME-->", name)
+    return HTMLResponse(html)
 
 
+# ── API ─────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "app": "STElliot"}
@@ -281,7 +491,11 @@ def run_analysis_sync(symbol, tf):
 
 
 @app.get("/api/analyze")
-async def api_analyze(symbol: str = "005930", tf: str = "60"):
+async def api_analyze(request: Request, symbol: str = "005930", tf: str = "60"):
+    user = _get_user(request)
+    if not user:
+        return JSONResponse({"error": "로그인이 필요합니다."}, status_code=401)
+
     try:
         loop = asyncio.get_event_loop()
         output = await asyncio.wait_for(
